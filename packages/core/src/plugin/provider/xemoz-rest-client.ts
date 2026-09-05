@@ -23,10 +23,7 @@ export interface XemozResponse {
 
 const DEFAULT_BASE_URL = "https://api-xemoz-official.my.id/api/ai"
 const DEFAULT_MODEL = "gpt-5.5"
-const DEFAULT_TIMEOUT = 60000
-// API ini GET-based (pesan dikirim lewat query string), jadi pesan yang
-// kepanjangan bisa kena limit URL server (biasanya HTTP 403/414). Kalau itu
-// terjadi, kita coba lagi dengan pesan yang dipotong makin pendek.
+const DEFAULT_TIMEOUT = 30000
 const TRUNCATE_LENGTHS = [1400, 1000, 500]
 
 export class XemozProvider {
@@ -41,45 +38,21 @@ export class XemozProvider {
     this.timeout = config.timeout || DEFAULT_TIMEOUT
   }
 
-  /**
-   * Create a language model instance compatible with AI SDK v3
-   */
   languageModel(modelId?: string) {
     const model = modelId || this.defaultModel
     const baseURL = this.baseURL
     const timeout = this.timeout
 
-    // Closure lokal, bukan method di object literal — supaya doStream bisa
-    // memanggilnya langsung tanpa bergantung pada binding `this`.
     async function doGenerate(options: any) {
       const userMessage = extractConversation(options.prompt)
 
       if (!userMessage) {
         const text = "Hello! How can I help you?"
-        return {
-          text,
-          finishReason: "stop" as const,
-          usage: emptyUsage(),
-          content: [{ type: "text" as const, text }],
-          response: { id: `xemoz-${Date.now()}`, timestamp: new Date(), modelId: model },
-          warnings: [],
-        }
+        return makeResult(text, model)
       }
 
       const reply = await callXemozAPI(baseURL, model, userMessage, timeout)
-
-      return {
-        text: reply,
-        finishReason: "stop" as const,
-        usage: estimateUsage(userMessage, reply),
-        content: [{ type: "text" as const, text: reply }],
-        response: {
-          id: `xemoz-${Date.now()}`,
-          timestamp: new Date(),
-          modelId: model,
-        },
-        warnings: [],
-      }
+      return makeResult(reply, model, userMessage)
     }
 
     return {
@@ -87,18 +60,8 @@ export class XemozProvider {
       provider: "xemoz-rest",
       modelId: model,
       supportedUrls: {} as Record<string, RegExp[]>,
-
-      /**
-       * Generate a response (non-streaming)
-       */
       doGenerate,
 
-      /**
-       * Generate a streaming response.
-       * API tidak mendukung streaming asli, jadi kita simulasikan dengan
-       * mengirim balasan lengkap sebagai satu chunk (lebih sederhana dan
-       * lebih cepat daripada chunking artifisial, dan tidak mengubah hasil).
-       */
       async doStream(options: any) {
         const result = await doGenerate(options)
         const text = result.text
@@ -109,11 +72,7 @@ export class XemozProvider {
             start(controller) {
               controller.enqueue({ type: "stream-start", warnings: [] })
               controller.enqueue({ type: "text-start", id: textId })
-              controller.enqueue({
-                type: "text-delta",
-                id: textId,
-                delta: text,
-              })
+              controller.enqueue({ type: "text-delta", id: textId, delta: text })
               controller.enqueue({ type: "text-end", id: textId })
               controller.enqueue({
                 type: "finish",
@@ -131,91 +90,99 @@ export class XemozProvider {
   }
 }
 
-function emptyUsage() {
+function makeResult(text: string, model: string, input?: string) {
+  const inputTokens = input ? Math.ceil(input.length / 4) : 0
+  const outputTokens = Math.ceil(text.length / 4)
   return {
-    inputTokens: { total: 0, noCache: 0, cacheRead: 0, cacheWrite: 0 },
-    outputTokens: { total: 0 },
-  }
-}
-
-// Xemoz tidak mengembalikan token count asli, jadi kita perkirakan secara
-// kasar (~4 karakter per token) supaya UI biaya/limit di opencode tetap
-// dapat menampilkan angka yang masuk akal alih-alih nol terus.
-function estimateUsage(input: string, output: string) {
-  const inputTokens = Math.ceil(input.length / 4)
-  const outputTokens = Math.ceil(output.length / 4)
-  return {
-    inputTokens: { total: inputTokens, noCache: inputTokens, cacheRead: 0, cacheWrite: 0 },
-    outputTokens: { total: outputTokens },
+    text,
+    finishReason: "stop" as const,
+    usage: {
+      inputTokens: { total: inputTokens, noCache: inputTokens, cacheRead: 0, cacheWrite: 0 },
+      outputTokens: { total: outputTokens },
+    },
+    content: [{ type: "text" as const, text }],
+    response: {
+      id: `xemoz-${Date.now()}`,
+      timestamp: new Date(),
+      modelId: model,
+    },
+    warnings: [],
   }
 }
 
 /**
- * Call the Xemoz API, retrying with progressively shorter messages if the
- * server rejects the request for being too long (403/414). Network errors
- * (timeout, DNS, connection reset) are NOT retried with truncation, since
- * shortening the message won't fix those — they're thrown immediately.
+ * Call the Xemoz API with robust timeout handling.
+ * Retries with shorter messages on empty replies or URL-length errors.
+ * Uses Promise.race + AbortSignal for bulletproof timeout in all environments.
  */
 async function callXemozAPI(baseURL: string, model: string, message: string, timeout: number): Promise<string> {
   const attempts = TRUNCATE_LENGTHS.filter((len) => len < message.length)
   if (attempts.length === 0 || attempts[0] !== message.length) attempts.unshift(message.length)
 
-  let lastHttpError: Error | undefined
+  let lastError: Error | undefined
 
   for (const maxLen of attempts) {
     const truncated = message.length > maxLen ? message.slice(message.length - maxLen) : message
     const url = `${baseURL}/${model}.php?pesan=${encodeURIComponent(truncated)}`
 
-    const controller = new AbortController()
-    const timeoutId = setTimeout(() => controller.abort(), timeout)
-
-    let response: Response
     try {
-      response = await fetch(url, {
-        method: "GET",
-        headers: { Accept: "application/json" },
-        signal: controller.signal,
-      })
-    } catch (error: any) {
-      clearTimeout(timeoutId)
-      if (error.name === "AbortError") {
-        throw new Error(`Xemoz API timeout after ${timeout}ms`)
-      }
-      // Network-level failure — truncating the message won't help, so fail fast.
-      throw new Error(`Xemoz API error: ${error.message}`)
-    }
-    clearTimeout(timeoutId)
-
-    if (response.ok) {
-      const data: XemozResponse = await response.json()
+      const data = await fetchWithTimeout(url, timeout)
       const reply = data.result?.reply || ""
-      // API returns 200 OK but empty reply when URL is too long — retry with shorter message
       if (reply && reply.length > 0) return reply
-      // Empty reply — treat like URL-too-long and retry
+
+      // Empty reply — retry with shorter message if possible
       if (maxLen !== attempts[attempts.length - 1]) {
-        lastHttpError = new Error("Xemoz API: empty reply (likely URL too long)")
+        lastError = new Error("Empty reply")
         continue
       }
-      return "No response from API"
+      return "Maaf, saya tidak bisa merespons saat ini. Silakan coba lagi."
+    } catch (error: any) {
+      // Network/timeout errors — fail fast, don't retry with truncation
+      const msg = error.message || String(error)
+      if (msg.includes("timeout") || msg.includes("AbortError") || msg.includes("network")) {
+        throw new Error(`Xemoz API: ${msg}`)
+      }
+      lastError = error
     }
-
-    // Only URL-length-related statuses justify retrying with a shorter message.
-    if ((response.status === 403 || response.status === 414) && maxLen !== attempts[attempts.length - 1]) {
-      lastHttpError = new Error(`Xemoz API HTTP ${response.status}: ${response.statusText}`)
-      continue
-    }
-
-    throw new Error(`Xemoz API HTTP ${response.status}: ${response.statusText}`)
   }
 
-  throw lastHttpError ?? new Error("Xemoz API: all retry attempts failed")
+  throw lastError ?? new Error("Xemoz API: semua percobaan gagal")
 }
 
 /**
- * Extract plain text from a message's `content`, which may be a string
- * or an array of content parts (only text parts are kept; images/files
- * are skipped since this API is text-only).
+ * fetch with Promise.race timeout — works reliably in Bun, Node, and Termux.
  */
+async function fetchWithTimeout(url: string, timeoutMs: number): Promise<any> {
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
+
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      signal: controller.signal,
+    })
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`)
+    }
+
+    // Also timeout the JSON parsing step
+    const jsonPromise = response.json()
+    const jsonTimeout = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error("JSON parse timeout")), timeoutMs),
+    )
+    return await Promise.race([jsonPromise, jsonTimeout])
+  } catch (error: any) {
+    if (error.name === "AbortError" || error.message?.includes("timeout")) {
+      throw new Error("timeout")
+    }
+    throw error
+  } finally {
+    clearTimeout(timeoutId)
+  }
+}
+
 function extractTextContent(content: any): string {
   if (typeof content === "string") return content
   if (Array.isArray(content)) {
@@ -227,12 +194,6 @@ function extractTextContent(content: any): string {
   return ""
 }
 
-/**
- * Flatten the prompt array into a single message string. API ini cuma
- * menerima satu string "pesan", jadi seluruh riwayat percakapan (termasuk
- * balasan assistant sebelumnya) digabung dengan label peran, supaya konteks
- * multi-turn tidak hilang di setiap giliran.
- */
 function extractConversation(prompt: any): string {
   if (!prompt) return ""
   if (typeof prompt === "string") return prompt
@@ -257,9 +218,6 @@ function extractConversation(prompt: any): string {
   return ""
 }
 
-/**
- * Create a new Xemoz provider instance
- */
 export function createXemozRest(config?: XemozConfig) {
   return new XemozProvider(config)
 }
