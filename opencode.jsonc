@@ -10,7 +10,20 @@
       "options": {
         "baseURL": "https://api-xemoz-official.my.id/api/ai",
         "model": "gpt-5.5",
-        "timeout": 60000
+        // Diturunkan dari 60000 -> 20000. Kalau server Xemoz lambat/down,
+        // CLI gagal cepat alih-alih terasa "ngestuk" sampai 1 menit.
+        "timeout": 20000,
+        // Cuma kirim 6 giliran terakhir (bukan seluruh histori chat) supaya
+        // URL request tidak membengkak seiring panjangnya percakapan.
+        "maxHistoryTurns": 6,
+        // Batas aman panjang pesan (karakter) sebelum dipotong, biar hampir
+        // selalu berhasil di percobaan pertama tanpa retry-truncate.
+        "maxMessageLength": 1400,
+        // Simulasi streaming: balasan dikirim ke CLI per-24-karakter dengan
+        // jeda 12ms, supaya terasa "mengetik" alih-alih diam lalu muncul
+        // sekaligus. Set streamChunkSize ke 0 untuk kirim sekaligus (lama).
+        "streamChunkSize": 24,
+        "streamChunkDelayMs": 12
       },
       "models": {
         "gpt-5.5": {
