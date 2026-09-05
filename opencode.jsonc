@@ -1,0 +1,49 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  // OpenCode Configuration with Xemoz REST API as AI Engine
+  // API: GET https://api-xemoz-official.my.id/api/ai/{model}.php?pesan={message}
+
+  "provider": {
+    "xemoz-rest": {
+      "name": "Xemoz AI",
+      "npm": "xemoz-rest",
+      "options": {
+        "baseURL": "https://api-xemoz-official.my.id/api/ai",
+        "model": "gpt-5.5",
+        "timeout": 60000
+      },
+      "models": {
+        "gpt-5.5": {
+          "name": "GPT-5.5",
+          "id": "gpt-5.5",
+          "family": "gpt",
+          "release_date": "2025-01-01",
+          "attachment": false,
+          "reasoning": false,
+          "temperature": false,
+          "tool_call": false,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cache_read": 0,
+            "cache_write": 0
+          },
+          "limit": {
+            "context": 128000,
+            "output": 4096
+          },
+          "modalities": {
+            "input": ["text"],
+            "output": ["text"]
+          }
+        }
+      }
+    }
+  },
+
+  // Use xemoz-rest as default provider
+  "model": "xemoz-rest/gpt-5.5",
+
+  // Disable all other providers
+  "enabled_providers": ["xemoz-rest"]
+}
